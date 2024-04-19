@@ -3,8 +3,14 @@
 //! This plugin crate will not be known to the user, both parties will interact with the help of
 //! the shared plugin API.
 
+use ::std::{
+    ptr::NonNull,
+    sync::{Arc, Mutex},
+};
+
 use enigo::{Button, Direction, Enigo, Keyboard, Mouse, Settings};
 use inputflow::prelude::*;
+use v1::abi_stable::reexports::SelfOps;
 
 #[derive(Default)]
 struct NativePluginRoot {
@@ -30,9 +36,85 @@ impl<'a> PluginInner<'a> for NativePluginRoot {
     }
 }
 
+struct WrappedEnigo(NonNull<Enigo>);
+
+unsafe impl Send for WrappedEnigo {}
+
+struct SafeEnigo {
+    inner: Mutex<WrappedEnigo>,
+}
+
+impl SafeEnigo {
+    pub fn new() -> Self {
+        let enigo = Enigo::new(&Settings {
+            release_keys_when_dropped: true,
+            ..Default::default()
+        })
+        .expect("Setting up enigo");
+        let ptr = NonNull::new(enigo).expect("Non-null expected");
+        Self {
+            inner: Mutex::new(WrappedEnigo(ptr)),
+        }
+    }
+}
+
+// impl KeyboardWriter for SafeEnigo {
+//     fn send_key_down(&mut self, button: u32) -> Result<()> {
+//         if let Some(key) = keycode_to_button(button) {
+//             let locked = unsafe {
+//                 self.inner
+//                     .lock()
+//                     .unwrap()
+//                     .0
+//                     .as_ref()
+//                     .button(key, Direction::Press)
+//                     .map_err(|_| InputFlowError::SendError)
+//             };
+//             locked
+//             // let test = self
+//             //     .enigo
+//             //     .lock()
+//             //     .unwrap()
+//             //     .button(key, Direction::Press)
+//             //     .map_err(|_| InputFlowError::SendError);
+//             // test
+//         } else {
+//             Err(InputFlowError::InvalidKey)
+//         }
+//     }
+//
+//     #[doc = r" Releases a key that was set to down previously"]
+//     fn send_key_up(&mut self, key: u32) -> Result<()> {
+//         todo!()
+//     }
+//
+//     #[doc = r" Presses a key and lets it go all in one for when users do not care about specific timings"]
+//     fn press_key(&mut self, key: u32) -> Result<()> {
+//         todo!()
+//     }
+//
+//     #[doc = r" clears all active pressed keys. Useful for cleaning up multiple keys presses in one go."]
+//     #[doc = r" Ensures that keyboard writer is set back into a neutral state."]
+//     fn clear_keys(&mut self) -> Result<()> {
+//         todo!()
+//     }
+// }
+
 #[derive(Debug)]
 pub struct InputFlowNative {
     enigo: Enigo,
+}
+
+impl InputFlowNative {
+    pub fn new() -> Self {
+        Self {
+            enigo: Enigo::new(&Settings {
+                release_keys_when_dropped: true,
+                ..Default::default()
+            })
+            .expect("Setting up enigo"),
+        }
+    }
 }
 
 impl Clone for InputFlowNative {
@@ -53,13 +135,7 @@ impl Loadable for InputFlowNative {
 
 impl Default for InputFlowNative {
     fn default() -> Self {
-        Self {
-            enigo: Enigo::new(&Settings {
-                release_keys_when_dropped: true,
-                ..Default::default()
-            })
-            .expect("setting up enigo"),
-        }
+        Self::new()
     }
 }
 
@@ -88,7 +164,7 @@ fn keycode_to_button(btn: u32) -> Option<Button> {
     }
 }
 
-impl KeyboardWriter for InputFlowNative {
+impl KeyboardWriter for SafeEnigo {
     #[doc = r" Sends keyboard press down event"]
     fn send_key_down(&mut self, key: u32) -> Result<()> {
         todo!()
@@ -111,11 +187,12 @@ impl KeyboardWriter for InputFlowNative {
     }
 }
 
-impl MouseWriter for InputFlowNative {
+impl MouseWriter for SafeEnigo {
     #[doc = r" Sends mouse button press down event"]
     fn send_button_down(&mut self, button: u32) -> Result<()> {
+        let enigo = InputFlowNative::new();
         if let Some(key) = keycode_to_button(button) {
-            self.enigo
+            enigo
                 .button(key, Direction::Press)
                 .map_err(|_| InputFlowError::SendError)
         } else {
@@ -126,9 +203,14 @@ impl MouseWriter for InputFlowNative {
     #[doc = r" Releases a mouse button that was set to down previously"]
     fn send_button_up(&mut self, button: u32) -> Result<()> {
         if let Some(button) = keycode_to_button(button) {
-            self.enigo
-                .button(button, Direction::Release)
-                .map_err(|_| InputFlowError::SendError)
+            let enigo_mutex = self.inner.lock().unwrap();
+            unsafe {
+                enigo_mutex
+                    .0
+                    .as_ref()
+                    .button(button, Direction::Release)
+                    .map_err(|_| InputFlowError::SendError)
+            }
         } else {
             Err(InputFlowError::InvalidKey)
         }
@@ -170,7 +252,7 @@ impl MouseWriter for InputFlowNative {
     }
 }
 
-cglue_impl_group!(InputFlowNative, ControllerFeatures,{KeyboardWriter, MouseWriter}, {KeyboardWriter, MouseWriter} );
+cglue_impl_group!(SafeEnigo, ControllerFeatures,{KeyboardWriter, MouseWriter}, {KeyboardWriter, MouseWriter} );
 
 extern "C" fn create_plugin(lib: &CArc<cglue::trait_group::c_void>) -> PluginInnerArcBox<'static> {
     // type_identity!();
